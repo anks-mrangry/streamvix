@@ -1,0 +1,7 @@
+services:
+  streamvix:
+    build: [https://github.com/anks-mrangry/streamvix.git#main](https://github.com/anks-mrangry/streamvix.git#main)
+    container_name: streamvix
+    restart: unless-stopped
+    ports:
+      - '7860:7860'
