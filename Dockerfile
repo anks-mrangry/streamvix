@@ -14,7 +14,7 @@ WORKDIR /usr/src/app
 # Clona il repository Git
 # Sostituisci con l'URL del tuo repository e opzionalmente un branch o tag
 
-ARG GIT_REPO_URL="https://github.com/qwertyuiop8899/streamvix.git"
+ARG GIT_REPO_URL="https://github.com/anks-mrangry/streamvix.git"
 ARG GIT_BRANCH="main"
 
 ARG CACHE_BUST2=233
