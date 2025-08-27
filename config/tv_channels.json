@@ -1559,6 +1559,17 @@
     "category": "sport"
   },
   {
+    "id": "dazn2",
+    "type": "tv",
+    "name": "Dazn 2",
+    "poster": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/DAZN_2.svg/882px-DAZN_2.svg.png",
+    "description": "Dazn 2",
+    "epgChannelIds": [
+      "dazn2.it"
+    ],
+    "category": "sport"
+  },
+  {
     "id": "dazn",
     "type": "tv",
     "name": "Dazn",

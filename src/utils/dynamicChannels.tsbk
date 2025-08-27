@@ -57,75 +57,32 @@ const KEEP_YESTERDAY: boolean = (() => {
 })();
 
 function resolveDynamicFile(): string {
-  // 1) Env override
-  try {
-    const envPath = (process?.env?.DYNAMIC_FILE || '').toString().trim();
-    if (envPath) {
-      if (fs.existsSync(envPath)) {
-        try { console.log('[DynamicChannels] Path da DYNAMIC_FILE:', envPath); } catch {}
-        return envPath;
-      } else {
-        try { console.warn('[DynamicChannels] DYNAMIC_FILE settato ma non esiste:', envPath); } catch {}
-      }
-    }
-  } catch {}
-
-  // 2) Cerca in possibili posizioni (support legacy nested config/config)
+  // Cerca in possibili posizioni (support legacy nested config/config)
   const candidates = [
     // Dev (ts-node src/...): __dirname ~ src/utils -> ../../config => root/config (OK)
     path.resolve(__dirname, '../../config/dynamic_channels.json'),
-    // Dist (addon.js compilato in dist/, utils in dist/utils): usare ../../../config -> root/config
-    path.resolve(__dirname, '../../../config/dynamic_channels.json'),
-    // Dist variant: ../config from dist root
+    // Dist (addon.js compilato in dist/, utils in dist/utils): usare ../config -> dist/../config => root/config
     path.resolve(__dirname, '../config/dynamic_channels.json'),
-    // Nested legacy path (avoid but fallback)
+    // Some builds may flatten further; try single up level from dist root
+    path.resolve(__dirname, '../../../config/dynamic_channels.json'),
+    // Nested legacy path
     path.resolve(__dirname, '../../config/config/dynamic_channels.json'),
     // CWD fallback (eseguito da root progetto)
     path.resolve(process.cwd(), 'config/dynamic_channels.json')
   ];
-
-  // Filtra esistenti e raccogli dimensioni; preferisci quello più grande, non-nested e non "tiny" (es. touch -> 0/1 byte)
-  const existing: { p: string; size: number; nested: boolean; tiny: boolean }[] = [];
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) {
-        let size = 0;
-        try { size = fs.statSync(p).size || 0; } catch {}
-        existing.push({ p, size, nested: /\/(^|.*\/)config\/config\//.test(p) || p.includes(path.sep + 'config' + path.sep + 'config' + path.sep), tiny: size < 10 });
+        try { console.log('[DynamicChannels] Path selezionato:', p); } catch {}
+        return p;
       }
     } catch {}
-  }
-  if (existing.length) {
-    // Ordina: non-nested prima, non-tiny prima, poi size desc
-    existing.sort((a, b) => {
-      if (a.nested !== b.nested) return a.nested ? 1 : -1;
-      if (a.tiny !== b.tiny) return a.tiny ? 1 : -1;
-      return b.size - a.size;
-    });
-    const chosen = existing[0];
-    try { console.log('[DynamicChannels] Path selezionato:', chosen.p, 'size=', chosen.size, 'nested=', chosen.nested, 'tiny=', chosen.tiny); } catch {}
-    return chosen.p;
   }
   try { console.warn('[DynamicChannels] dynamic_channels.json non trovato in nessuno dei path candidati, uso primo fallback:', candidates[0]); } catch {}
   return candidates[0]; // fallback
 }
 
 let DYNAMIC_FILE = resolveDynamicFile();
-
-// Export helpers for diagnostics
-export function getDynamicFilePath(): string {
-  return DYNAMIC_FILE;
-}
-
-export function getDynamicFileStats(): { exists: boolean; size: number; mtimeMs: number } {
-  try {
-    if (!fs.existsSync(DYNAMIC_FILE)) return { exists: false, size: 0, mtimeMs: 0 };
-    const st = fs.statSync(DYNAMIC_FILE);
-    return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
-  } catch {
-    return { exists: false, size: 0, mtimeMs: 0 };
-  }
-}
 
 export function loadDynamicChannels(force = false): DynamicChannel[] {
   const now = Date.now();
@@ -309,7 +266,7 @@ export function purgeOldDynamicEvents(): { before: number; after: number; remove
         return fmt.format(d); // YYYY-MM-DD
       } catch { return null; }
     };
-  const todayRomeStr = (() => {
+    const todayRomeStr = (() => {
       try {
         const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit' } as any);
         return fmt.format(new Date());
@@ -318,8 +275,6 @@ export function purgeOldDynamicEvents(): { before: number; after: number; remove
   const yRomeTmp2 = new Date(nowRome);
   yRomeTmp2.setDate(yRomeTmp2.getDate() - 1);
   const yesterdayRomeStr = datePartRome(yRomeTmp2.toISOString()) || '';
-  // Grace period: mantieni anche IERI fino alle 08:00 Rome, indipendentemente da KEEP_YESTERDAY
-  const isBeforeGrace = (() => { try { return nowRome.getHours() < 8; } catch { return false; } })();
     // Deriva eventStart se mancante (00:00 del giorno codificato nell'id)
     for (const ch of data) {
       if (!ch.eventStart && typeof ch.id === 'string') {
@@ -349,11 +304,7 @@ export function purgeOldDynamicEvents(): { before: number; after: number; remove
   if (!chDate) return true;
   // Mantieni oggi; opzionalmente mantieni anche ieri
   if (chDate >= todayRomeStr) return true;
-  // Effettivo mantenimento di IERI: fino alle 08:00 Rome sempre; dopo, solo se KEEP_YESTERDAY è attivo
-  if (chDate === yesterdayRomeStr) {
-    if (isBeforeGrace) return true;
-    if (KEEP_YESTERDAY) return true;
-  }
+  if (KEEP_YESTERDAY && chDate === yesterdayRomeStr) return true;
   return false; // rimuove se < ieri (o < oggi se KEEP_YESTERDAY è off)
     });
     fs.writeFileSync(DYNAMIC_FILE, JSON.stringify(filtered, null, 2), 'utf-8');

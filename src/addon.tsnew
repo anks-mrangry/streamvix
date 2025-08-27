@@ -2644,12 +2644,10 @@ app.get('/live/update', async (req: Request, res: Response) => {
         if (requiredToken && provided !== requiredToken) {
             return res.status(403).json({ ok: false, error: 'Forbidden' });
         }
-    // Esegue Live.py immediatamente (se esiste)
-    // Riutilizza executeLiveScript già definita nello scheduler e recupera stdout/stderr
-    const execRes = await (async () => { try { return await (executeLiveScript as any)(); } catch { return undefined; } })();
-    // Subito dopo Live.py: esegui purge per rimuovere eventi vecchi, mantenendo IERI fino alle 08:00 Rome
-    const purgeResult = purgeOldDynamicEvents();
-    // Ricarica sempre i canali dinamici dopo il purge
+        // Esegue Live.py immediatamente (se esiste) e ricarica i canali
+        // Riutilizza executeLiveScript già definita nello scheduler e recupera stdout/stderr
+        const execRes = await (async () => { try { return await (executeLiveScript as any)(); } catch { return undefined; } })();
+    // Assicurati di avere il conteggio aggiornato degli eventi dinamici
     const dyn = loadDynamicChannels(true);
     const dynPath = getDynamicFilePath();
     const dynStats = getDynamicFileStats();
@@ -2667,10 +2665,9 @@ app.get('/live/update', async (req: Request, res: Response) => {
         const clip = (s?: string) => s ? (s.length > 800 ? s.slice(-800) : s) : undefined; // prendi ultime 800 chars
         return res.json({
             ok: true,
-            message: `Live.py eseguito (se presente), purge effettuato e canali ricaricati: eventi dinamici=${dyn.length}${createdCount!=null?` (creati=${createdCount})`:''}`,
+            message: `Live.py eseguito (se presente) e canali ricaricati: eventi dinamici=${dyn.length}${createdCount!=null?` (creati=${createdCount})`:''}`,
             dynamicCount: dyn.length,
             createdCount,
-            purge: purgeResult,
             dynamicFile: {
                 path: dynPath,
                 exists: dynStats.exists,
@@ -2854,13 +2851,6 @@ function scheduleNextLiveRun() {
     logLive('Prossima esecuzione Live.py tra ms', delay);
     setTimeout(async () => {
         await executeLiveScript();
-        try {
-            const r = purgeOldDynamicEvents();
-            loadDynamicChannels(true);
-            logLive('Purge post-run Live.py eseguito', r);
-        } catch (e: any) {
-            logLive('Errore purge post-run Live.py', e?.message || String(e));
-        }
         scheduleNextLiveRun();
     }, delay);
 }

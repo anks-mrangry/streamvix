@@ -137,37 +137,7 @@ TEAM_SPECIAL = {
     'ss lazio': 'lazio',
      # aggiunte per loghi Serie B
     'virtus entella': 'entella',
-    'juve stabia': 'juvestabia',
-    # aggiunte Serie A/B per normalizzazioni comuni
-    'ac milan': 'milan',
-    'a.c. milan': 'milan',
-    'milan': 'milan',
-    'atalanta bc': 'atalanta',
-    'atalanta': 'atalanta',
-    'f.c. internazionale': 'inter',
-    'hellas verona': 'verona',
-    'udinese calcio': 'udinese',
-    'genoa cfc': 'genoa',
-    'genoa': 'genoa',
-    'cagliari calcio': 'cagliari',
-    'cagliari': 'cagliari',
-    'fiorentina': 'fiorentina',
-    'bologna fc': 'bologna',
-    'bologna': 'bologna',
-    'lecce': 'lecce',
-    'empoli': 'empoli',
-    'monza': 'monza',
-    'sassuolo': 'sassuolo',
-    'salernitana': 'salernitana',
-    'torino': 'torino',
-    'sampdoria': 'sampdoria',
-    'parma': 'parma',
-    'venezia': 'venezia',
-    'cremonese': 'cremonese',
-    'palermo': 'palermo',
-    'bari': 'bari',
-    'como': 'como',
-    'cosenza': 'cosenza',
+    'juve stabia': 'juvestabia'
 }
 
 MATCH_SPLIT_REGEX = re.compile(r'\bvs\b| - ', re.IGNORECASE)
@@ -242,30 +212,7 @@ def normalize_team(team: str) -> str:
     key = base.lower()
     if key in TEAM_SPECIAL:
         return TEAM_SPECIAL[key]
-    # Fuzzy keywords: se contiene una parola chiave di una squadra nota, mappa a quella
-    # Copre varianti tipo "Hellas Verona" -> "verona", "Genoa CFC" -> "genoa", ecc.
-    TEAM_KEYWORDS = {
-        # Serie A
-        'juventus': 'juventus', 'napoli': 'napoli', 'inter': 'inter', 'internazionale': 'inter', 'milan': 'milan',
-        'atalanta': 'atalanta', 'fiorentina': 'fiorentina', 'bologna': 'bologna', 'torino': 'torino', 'roma': 'roma', 'lazio': 'lazio',
-        'udinese': 'udinese', 'monza': 'monza', 'empoli': 'empoli', 'sassuolo': 'sassuolo', 'cagliari': 'cagliari', 'lecce': 'lecce',
-        'verona': 'verona', 'hellas': 'verona', 'genoa': 'genoa', 'salernitana': 'salernitana',
-        # Serie B (principali)
-        'parma': 'parma', 'venezia': 'venezia', 'cremonese': 'cremonese', 'palermo': 'palermo', 'bari': 'bari', 'como': 'como',
-        'sampdoria': 'sampdoria', 'cosenza': 'cosenza', 'brescia': 'brescia', 'spezia': 'spezia', 'cittadella': 'cittadella',
-        'reggiana': 'reggiana', 'frosinone': 'frosinone', 'pisa': 'pisa', 'modena': 'modena', 'ascoli': 'ascoli', 'ternana': 'ternana',
-        'sudtirol': 'sudtirol', 'südtirol': 'sudtirol', 'lecce': 'lecce', 'entella': 'entella', 'juve stabia': 'juvestabia'
-    }
-    bl = key
-    for kw, canon in TEAM_KEYWORDS.items():
-        # parola intera o sottostringa robusta
-        if re.search(rf"\b{re.escape(kw)}\b", bl):
-            return canon
-    # fallback: usa l'ultima parola utile (es. "Hellas Verona" -> "verona")
-    tokens = [w for w in re.split(r"\s+", bl) if w and w not in TEAM_CLEAN_WORDS]
-    if tokens:
-        return tokens[-1]
-    return bl
+    return base.lower()
 
 def extract_teams(event_name: str) -> tuple[str|None, str|None]:
     parts = MATCH_SPLIT_REGEX.split(event_name)

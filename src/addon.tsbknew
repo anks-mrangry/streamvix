@@ -45,73 +45,6 @@ function debugLog(...args: any[]) {
     }
 }
 
-// VAVOO debug switch
-// Now ENABLED by default. You can disable with VAVOO_DEBUG=0 or DEBUG_VAVOO=0.
-// Set to '1'/'true' to force enable, '0'/'false' to force disable.
-const VAVOO_DEBUG: boolean = (() => {
-    try {
-        const env = (process && process.env) ? process.env : {} as any;
-        const norm = (v?: string) => (v || '').toString().trim().toLowerCase();
-        const v1 = norm(env.VAVOO_DEBUG);
-        const v2 = norm(env.DEBUG_VAVOO);
-        if (v1) return !(v1 === '0' || v1 === 'false' || v1 === 'off');
-        if (v2) return !(v2 === '0' || v2 === 'false' || v2 === 'off');
-        return true; // default ON
-    } catch { return true; }
-})();
-function vdbg(...args: any[]) {
-    if (!VAVOO_DEBUG) return;
-    try { console.log('[VAVOO-DEBUG]', ...args); } catch { /* ignore */ }
-}
-
-// Optional: force using server IP (ignore client IP forwarding) for Vavoo calls
-// DEFAULT: ON (use server IP). Disable with VAVOO_FORCE_SERVER_IP=0 or VAVOO_USE_SERVER_IP=0
-const VAVOO_FORCE_SERVER_IP: boolean = (() => {
-    try {
-        const env = (process && process.env) ? process.env : {} as any;
-        const norm = (v?: string) => (v || '').toString().trim().toLowerCase();
-        const v1 = norm(env.VAVOO_FORCE_SERVER_IP);
-        const v2 = norm(env.VAVOO_USE_SERVER_IP);
-        if (v1) return !(v1 === '0' || v1 === 'false' || v1 === 'off');
-        if (v2) return !(v2 === '0' || v2 === 'false' || v2 === 'off');
-        return true; // default ON
-    } catch { return true; }
-})();
-
-// New: set only ipLocation in ping body to the observed client IP, but DO NOT forward headers
-// This keeps transport on server IP while letting Vavoo embed the client IP in addonSig
-const VAVOO_SET_IPLOCATION_ONLY: boolean = (() => {
-    try {
-        const v = (process && process.env && process.env.VAVOO_SET_IPLOCATION_ONLY) ? String(process.env.VAVOO_SET_IPLOCATION_ONLY).toLowerCase() : '';
-    if (!v) return true; // default ON
-        return !(v === '0' || v === 'false' || v === 'off');
-    } catch { return false; }
-})();
-
-// Optional: allow full signature logging. Default NOW is FULL (no masking) as requested.
-// You can disable with VAVOO_LOG_SIG_FULL=0 (or 'false'/'off').
-const VAVOO_LOG_SIG_FULL: boolean = (() => {
-    try {
-        const env = (process && process.env) ? process.env : {} as any;
-        const v = (env.VAVOO_LOG_SIG_FULL || '').toString().trim().toLowerCase();
-        if (v === '0' || v === 'false' || v === 'off') return false;
-        if (v === '1' || v === 'true' || v === 'on') return true;
-        return true; // default ON -> full signature in logs (no masking)
-    } catch { return true; }
-})();
-
-function maskSig(sig: string, keepStart = 12, keepEnd = 6): string {
-    try {
-        if (!sig) return '';
-        const len = sig.length;
-        const head = sig.slice(0, Math.min(keepStart, len));
-        const tail = len > keepStart ? sig.slice(Math.max(len - keepEnd, keepStart)) : '';
-        const hidden = Math.max(0, len - head.length - tail.length);
-        const mask = hidden > 0 ? '*'.repeat(Math.min(hidden, 32)) + (hidden > 32 ? `(+${hidden - 32})` : '') : '';
-        return `${head}${mask}${tail}`;
-    } catch { return ''; }
-}
-
 // === CACHE: Dynamic event stream extraction (per d.url) ===
 // Key: `${mfpUrl}|${mfpPsw}|${originalDUrl}` -> { finalUrl, ts }
 const dynamicStreamCache = new Map<string, { finalUrl: string; ts: number }>();
@@ -148,288 +81,19 @@ async function resolveDynamicEventUrl(dUrl: string, providerTitle: string, mfpUr
             dynamicStreamCache.set(cacheKey, { finalUrl, ts: now });
             return { url: finalUrl, title: providerTitle };
         } else {
-            // Do NOT return extractor/video fallback in dynamic channels; keep original URL instead
-            dynamicStreamCache.set(cacheKey, { finalUrl: dUrl, ts: now });
-            return { url: dUrl, title: providerTitle };
+            const fallback = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent(dUrl)}`;
+            dynamicStreamCache.set(cacheKey, { finalUrl: fallback, ts: now });
+            return { url: fallback, title: providerTitle };
         }
     } catch {
-        // On error, avoid returning extractor/video fallback; expose original URL
-        dynamicStreamCache.set(cacheKey, { finalUrl: dUrl, ts: now });
-        return { url: dUrl, title: providerTitle };
+        const fallback = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent(dUrl)}`;
+        dynamicStreamCache.set(cacheKey, { finalUrl: fallback, ts: now });
+        return { url: fallback, title: providerTitle };
     }
 }
 
 // Global runtime configuration cache (was referenced below)
 const configCache: AddonConfig = {};
-
-// === CACHE: Per-request Vavoo clean link (per client_ip + link) ===
-const vavooCleanCache = new Map<string, { url: string; ts: number }>();
-const VAVOO_CLEAN_TTL_MS = 10 * 60 * 1000; // 10 minuti
-
-function getClientIpFromReq(req: any): string | null {
-    try {
-        if (!req) return null;
-        const hdr = (req.headers || {}) as Record<string, string | string[]>;
-        const asStr = (v?: string | string[]) => Array.isArray(v) ? v[0] : (v || '');
-        const parseIp = (v?: string) => {
-            if (!v) return '';
-            let s = v.trim();
-            // Forwarded: for="ip:port" or for=ip
-            s = s.replace(/^"|"$/g, '');
-            // Remove brackets for IPv6
-            s = s.replace(/^\[|\]$/g, '');
-            // Split possible comma list, take raw first element for further processing outside
-            return s;
-        };
-        const stripPort = (ip: string) => {
-            // If IPv4 with :port
-            if (ip.includes('.') && ip.includes(':')) return ip.split(':')[0];
-            // If IPv6 with :port
-            if (ip.includes(':') && ip.lastIndexOf(':') > 1 && ip.indexOf(']') === -1) {
-                // best-effort: keep as-is for IPv6 (ports uncommon in headers)
-                return ip;
-            }
-            return ip;
-        };
-        const isPrivate = (ip: string) => {
-            const x = ip.toLowerCase();
-            if (!x) return true;
-            // IPv6 loopback / unique-local / link-local
-            if (x === '::1' || x.startsWith('fc') || x.startsWith('fd') || x.startsWith('fe80')) return true;
-            // Remove brackets/port
-            const y = stripPort(x.replace(/^\[|\]$/g, ''));
-            // IPv4 private/reserved ranges
-            const m = y.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-            if (!m) return false;
-            const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
-            if (a === 10) return true; // 10.0.0.0/8
-            if (a === 127) return true; // loopback
-            if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-            if (a === 192 && b === 168) return true; // 192.168.0.0/16
-            if (a === 169 && b === 254) return true; // link-local
-            return false;
-        };
-        const pickFirstPublic = (list: string[]): string | null => {
-            for (const raw of list) {
-                const ip = stripPort(raw.replace(/^\[|\]$/g, ''));
-                if (ip && !isPrivate(ip)) return ip;
-            }
-            return list.length ? stripPort(list[0].replace(/^\[|\]$/g, '')) : null;
-        };
-
-        // 1) X-Forwarded-For: prefer first public entry
-        const xffRaw = asStr(hdr['x-forwarded-for']);
-        if (xffRaw) {
-            const parts = xffRaw.split(',').map(s => parseIp(s)).map(s => s.trim()).filter(Boolean);
-            const chosen = pickFirstPublic(parts);
-            if (chosen) { vdbg('IP pick via XFF', { chain: parts, chosen }); return chosen; }
-        }
-        // 2) True-Client-IP / CF-Connecting-IP / X-Real-IP / X-Client-IP
-        const tci = stripPort(parseIp(asStr(hdr['true-client-ip'])));
-        if (tci && !isPrivate(tci)) { vdbg('IP pick via True-Client-IP', { tci }); return tci; }
-        const cfc = stripPort(parseIp(asStr(hdr['cf-connecting-ip'])));
-        if (cfc && !isPrivate(cfc)) { vdbg('IP pick via CF-Connecting-IP', { cfc }); return cfc; }
-        const xr = stripPort(parseIp(asStr(hdr['x-real-ip'])));
-        if (xr && !isPrivate(xr)) { vdbg('IP pick via X-Real-IP', { xr }); return xr; }
-        const xci = stripPort(parseIp(asStr(hdr['x-client-ip'])));
-        if (xci && !isPrivate(xci)) { vdbg('IP pick via X-Client-IP', { xci }); return xci; }
-        // 3) Forwarded: for=
-        const fwd = asStr(hdr['forwarded']);
-        if (fwd) {
-            const m = fwd.match(/for=([^;]+)/i);
-            if (m && m[1]) {
-                const candidate = stripPort(parseIp(m[1]));
-                if (candidate && !isPrivate(candidate)) { vdbg('IP pick via Forwarded', { candidate }); return candidate; }
-            }
-        }
-        // 4) Express provided (requires trust proxy to be set elsewhere)
-        const ips = Array.isArray((req as any).ips) ? (req as any).ips : [];
-        if (ips.length) {
-            const chosen = pickFirstPublic(ips);
-            if (chosen) { vdbg('IP pick via req.ips', { ips, chosen }); return chosen; }
-        }
-        const ra = (req as any).ip || req.socket?.remoteAddress || req.connection?.remoteAddress;
-        if (ra) {
-            const v = stripPort(String(ra));
-            vdbg('IP pick via remoteAddress/ip (fallback)', { v });
-            return v.replace(/^\[|\]$/g, '');
-        }
-    } catch (e) { try { vdbg('IP detect error', String(e)); } catch {} }
-    return null;
-}
-
-async function resolveVavooCleanUrl(vavooPlayUrl: string, clientIp: string | null): Promise<{ url: string; headers: Record<string, string> } | null> {
-    try {
-        if (!vavooPlayUrl || !vavooPlayUrl.includes('vavoo.to')) return null;
-        // No cache: always resolve per request using the requester IP
-        const startedAt = Date.now();
-        vdbg('Clean resolve START', { url: vavooPlayUrl.substring(0, 120), ip: clientIp || '(none)' });
-
-        const controller = new AbortController();
-        const to = setTimeout(() => {
-            vdbg('Ping timeout -> aborting request');
-            controller.abort();
-        }, 12000);
-    const pingBody = {
-            token: 'tosFwQCJMS8qrW_AjLoHPQ41646J5dRNha6ZWHnijoYQQQoADQoXYSo7ki7O5-CsgN4CH0uRk6EEoJ0728ar9scCRQW3ZkbfrPfeCXW2VgopSW2FWDqPOoVYIuVPAOnXCZ5g',
-            reason: 'app-blur',
-            locale: 'de',
-            theme: 'dark',
-            metadata: {
-                device: { type: 'Handset', brand: 'google', model: 'Pixel', name: 'sdk_gphone64_arm64', uniqueId: 'd10e5d99ab665233' },
-                os: { name: 'android', version: '13', abis: ['arm64-v8a','armeabi-v7a','armeabi'], host: 'android' },
-                app: { platform: 'android', version: '3.1.21', buildId: '289515000', engine: 'hbc85', signatures: ['6e8a975e3cbf07d5de823a760d4c2547f86c1403105020adee5de67ac510999e'], installer: 'app.revanced.manager.flutter' },
-                version: { package: 'tv.vavoo.app', binary: '3.1.21', js: '3.1.21' }
-            },
-            appFocusTime: 0,
-            playerActive: false,
-            playDuration: 0,
-            devMode: false,
-            hasAddon: true,
-            castConnected: false,
-            package: 'tv.vavoo.app',
-            version: '3.1.21',
-            process: 'app',
-            firstAppStart: Date.now(),
-            lastAppStart: Date.now(),
-            ipLocation: (clientIp && (!VAVOO_FORCE_SERVER_IP || VAVOO_SET_IPLOCATION_ONLY)) ? clientIp : '',
-            adblockEnabled: true,
-            proxy: { supported: ['ss','openvpn'], engine: 'ss', ssVersion: 1, enabled: true, autoServer: true, id: 'de-fra' },
-            iap: { supported: false }
-        } as any;
-        const pingHeaders: Record<string, string> = { 'user-agent': 'okhttp/4.11.0', 'accept': 'application/json', 'content-type': 'application/json; charset=utf-8', 'accept-encoding': 'gzip' };
-    if (clientIp && !VAVOO_FORCE_SERVER_IP) {
-            pingHeaders['x-forwarded-for'] = clientIp;
-            pingHeaders['x-real-ip'] = clientIp;
-            pingHeaders['cf-connecting-ip'] = clientIp;
-            // Extra standard/proxy headers to propagate client IP without tampering tokens
-            pingHeaders['forwarded'] = `for=${clientIp}`; // RFC 7239
-            pingHeaders['true-client-ip'] = clientIp;     // Some CDNs
-            pingHeaders['x-client-ip'] = clientIp;        // Legacy
-            vdbg('Ping will forward client IP', { xff: clientIp, ipLocation: pingBody.ipLocation });
-        } else {
-            if (clientIp && VAVOO_SET_IPLOCATION_ONLY) {
-                vdbg('Ping ipLocation-only mode: set ipLocation to observed client IP, but using SERVER IP for transport (no forwarding headers).', { observedClientIp: clientIp });
-            } else if (clientIp) {
-                vdbg('Ping forced to use SERVER IP (no forwarding headers). Observed client IP present but NOT used.', { observedClientIp: clientIp });
-            } else {
-                vdbg('Ping will use SERVER IP (no client IP observed)');
-            }
-        }
-        vdbg('Ping POST https://www.vavoo.tv/api/app/ping', { ipLocation: pingBody.ipLocation });
-        const pingRes = await fetch('https://www.vavoo.tv/api/app/ping', {
-            method: 'POST',
-            headers: pingHeaders,
-            body: JSON.stringify(pingBody),
-            signal: controller.signal
-        } as any);
-        clearTimeout(to);
-        vdbg('Ping response', { status: pingRes.status, ok: pingRes.ok, tookMs: Date.now() - startedAt });
-        if (!pingRes.ok) {
-            let text = '';
-            try { text = await pingRes.text(); } catch {}
-            vdbg('Ping NOT OK, body snippet:', text.substring(0, 300));
-            return null;
-        }
-    const pingJson = await pingRes.json();
-    let addonSig = pingJson?.addonSig as string;
-        if (!addonSig) {
-            vdbg('Ping OK but addonSig missing. Payload keys:', Object.keys(pingJson || {}));
-            return null;
-        }
-    vdbg('Ping OK, addonSig len:', String(addonSig).length);
-    // Show signature in logs (full by default unless disabled)
-    const sigPreview = VAVOO_LOG_SIG_FULL ? String(addonSig) : maskSig(String(addonSig));
-    vdbg('Ping OK, addonSig preview:', sigPreview);
-    // Decode and REWRITE addonSig: replace ips with client IP, then re-encode (per user request)
-    try {
-        const decoded = Buffer.from(String(addonSig), 'base64').toString('utf8');
-        vdbg('addonSig base64 decoded (truncated):', decoded.substring(0, 500));
-        let sigObj: any = null;
-        try { sigObj = JSON.parse(decoded); } catch {}
-        if (sigObj) {
-            let dataObj: any = {};
-            try { dataObj = JSON.parse(sigObj?.data || '{}'); } catch {}
-            const currentIps = Array.isArray(dataObj.ips) ? dataObj.ips : [];
-            vdbg('addonSig.data ips (before):', currentIps);
-            if (clientIp) {
-                // Rewrite IPs to prioritize the observed client IP
-                const newIps = [clientIp, ...currentIps.filter((x: any) => x && x !== clientIp)];
-                dataObj.ips = newIps;
-                if (typeof dataObj.ip === 'string') dataObj.ip = clientIp;
-                try {
-                    sigObj.data = JSON.stringify(dataObj);
-                    const reencoded = Buffer.from(JSON.stringify(sigObj), 'utf8').toString('base64');
-                    vdbg('addonSig REWRITTEN with client IP', { oldLen: String(addonSig).length, newLen: String(reencoded).length });
-                    vdbg('addonSig.data ips (after):', newIps);
-                    addonSig = reencoded;
-                } catch (e) {
-                    vdbg('addonSig rewrite failed, will use original signature', String(e));
-                }
-            } else {
-                vdbg('No client IP observed, addonSig not rewritten');
-            }
-        }
-    } catch {}
-
-        const controller2 = new AbortController();
-        const to2 = setTimeout(() => {
-            vdbg('Resolve timeout -> aborting request');
-            controller2.abort();
-        }, 12000);
-    const resolveHeaders: Record<string, string> = { 'user-agent': 'MediaHubMX/2', 'accept': 'application/json', 'content-type': 'application/json; charset=utf-8', 'accept-encoding': 'gzip', 'mediahubmx-signature': addonSig };
-        if (clientIp && !VAVOO_FORCE_SERVER_IP) {
-            resolveHeaders['x-forwarded-for'] = clientIp;
-            resolveHeaders['x-real-ip'] = clientIp;
-            resolveHeaders['cf-connecting-ip'] = clientIp;
-            // Extra standard/proxy headers to propagate client IP without tampering tokens
-            resolveHeaders['forwarded'] = `for=${clientIp}`; // RFC 7239
-            resolveHeaders['true-client-ip'] = clientIp;     // Some CDNs
-            resolveHeaders['x-client-ip'] = clientIp;        // Legacy
-            vdbg('Resolve will forward client IP', { xff: clientIp, addonSigLen: String(addonSig).length });
-        } else {
-            if (clientIp) {
-                vdbg('Resolve forced to use SERVER IP (no forwarding headers added). Observed client IP present but NOT used.', { addonSigLen: String(addonSig).length, observedClientIp: clientIp });
-            } else {
-                vdbg('Resolve will use SERVER IP (no client IP observed)', { addonSigLen: String(addonSig).length });
-            }
-        }
-    // Log the signature being sent to resolve (masked by default)
-    vdbg('Resolve using signature:', VAVOO_LOG_SIG_FULL ? String(addonSig) : maskSig(String(addonSig)));
-        vdbg('Resolve POST https://vavoo.to/mediahubmx-resolve.json', { url: vavooPlayUrl.substring(0, 120), headers: Object.keys(resolveHeaders) });
-        const resolveRes = await fetch('https://vavoo.to/mediahubmx-resolve.json', {
-            method: 'POST',
-            headers: resolveHeaders,
-            body: JSON.stringify({ language: 'de', region: 'AT', url: vavooPlayUrl, clientVersion: '3.1.21' }),
-            signal: controller2.signal
-        } as any);
-        clearTimeout(to2);
-        vdbg('Resolve response', { status: resolveRes.status, ok: resolveRes.ok, tookMs: Date.now() - startedAt });
-        if (!resolveRes.ok) {
-            let text = '';
-            try { text = await resolveRes.text(); } catch {}
-            vdbg('Resolve NOT OK, body snippet:', text.substring(0, 300));
-            return null;
-        }
-        const resolveJson = await resolveRes.json();
-        let resolved: string | null = null;
-        if (Array.isArray(resolveJson) && resolveJson.length && resolveJson[0]?.url) resolved = String(resolveJson[0].url);
-        else if (resolveJson && typeof resolveJson === 'object' && resolveJson.url) resolved = String(resolveJson.url);
-        if (!resolved) {
-            vdbg('Resolve OK but no url field in JSON. Shape:', Array.isArray(resolveJson) ? 'array' : typeof resolveJson);
-            return null;
-        }
-        vdbg('Clean resolve SUCCESS', { url: resolved.substring(0, 200) });
-        return { url: resolved, headers: { 'User-Agent': DEFAULT_VAVOO_UA, 'Referer': 'https://vavoo.to/' } };
-    } catch (e) {
-        const msg = (e as any)?.message || String(e);
-        vdbg('Clean resolve ERROR:', msg);
-        console.error('[VAVOO] Clean resolve failed:', msg);
-        return null;
-    }
-}
-
-const DEFAULT_VAVOO_UA = 'Mozilla/5.0 (Linux; Android 13; Pixel Build/TQ3A.230805.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36';
 
 // Promisify execFile for reuse
 const execFilePromise = util.promisify(execFile);
@@ -454,7 +118,9 @@ function decodeBase64(str: string): string {
 // Funzione per decodificare URL statici (sempre in base64)
 function decodeStaticUrl(url: string): string {
     if (!url) return url;
+    
     console.log(`🔧 [Base64] Decodifica URL (sempre base64): ${url.substring(0, 50)}...`);
+    
     try {
         // Assicura padding corretto (lunghezza multipla di 4)
         let paddedUrl = url;
@@ -468,25 +134,29 @@ function decodeStaticUrl(url: string): string {
         return url;
     }
 }
+
 // ================= MANIFEST BASE (restored) =================
 const baseManifest: Manifest = {
     id: "org.stremio.vixcloud",
-    version: "5.5.23",
+    version: "5.3.2",
     name: "StreamViX",
-    description: "Addon for Vixsrc, Anime providers Live TV and Events.",
+    description: "Addon for Vixsrc, Anime providers and Live TV.",
+    icon: "https://raw.githubusercontent.com/qwertyuiop8899/StreamViX/refs/heads/main/public/icon.png",
     background: "https://raw.githubusercontent.com/qwertyuiop8899/StreamViX/refs/heads/main/public/backround.png",
     types: ["movie", "series", "tv", "anime"],
     idPrefixes: ["tt", "kitsu", "tv", "mal", "tmdb"],
     catalogs: [
         {
-            id: "streamvix_tv",
             type: "tv",
+            id: "tv-channels",
             name: "StreamViX TV",
             extra: [
                 {
                     name: "genre",
+                    isRequired: false,
                     options: [
                         "RAI",
+                        "Mediaset", 
                         "Sky",
                         "Sport",
                         "Cinema",
@@ -528,7 +198,7 @@ const baseManifest: Manifest = {
         { key: "tmdbApiKey", title: "TMDB API Key", type: "text" },
         { key: "mediaFlowProxyUrl", title: "MediaFlow Proxy URL", type: "text" },
         { key: "mediaFlowProxyPassword", title: "MediaFlow Proxy Password", type: "text" },
-        // { key: "enableMpd", title: "Enable MPD Streams", type: "checkbox" },
+        { key: "enableMpd", title: "Enable MPD Streams", type: "checkbox" },
         { key: "animeunityEnabled", title: "Enable AnimeUnity", type: "checkbox" },
         { key: "animesaturnEnabled", title: "Enable AnimeSaturn", type: "checkbox" },
         { key: "animeworldEnabled", title: "Enable AnimeWorld", type: "checkbox" }
@@ -1334,7 +1004,7 @@ function createBuilder(initialConfig: AddonConfig = {}) {
             } catch {}
             
             // Aggiungi prefisso tv: agli ID, posterShape landscape e EPG
-                const tvChannelsWithPrefix = await Promise.all(filteredChannels.map(async (channel: any) => {
+            const tvChannelsWithPrefix = await Promise.all(filteredChannels.map(async (channel: any) => {
                 const channelWithPrefix = {
                     ...channel,
                     id: `tv:${channel.id}`,
@@ -1347,39 +1017,18 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                 // Per canali dinamici: niente EPG, mostra solo ora inizio evento
                 if ((channel as any)._dynamic) {
                     const eventStart = (channel as any).eventStart || (channel as any).eventstart; // fallback
-                    const stripTimePrefix = (t: string): string => t.replace(/^\s*([⏰🕒]?\s*)?\d{1,2}[\.:]\d{2}\s*[:\-]\s*/i, '').trim();
+                    const baseDesc = channel.description || '';
                     if (eventStart) {
                         try {
                             const dt = new Date(eventStart);
                             const hhmm = dt.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Rome' }).replace(/\./g, ':');
-                            const ddmm = (() => {
-                                try { return dt.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Rome' }); } catch { return ''; }
-                            })();
-                            const rawTitle = stripTimePrefix(channel.name || '');
-                            const parts = rawTitle.split(' - ').map(s => s.trim()).filter(Boolean);
-                            const eventTitle = parts[0] || rawTitle;
-                            // Deriva league + date + country dal resto
-                            let tail = parts.slice(1).join(' - ');
-                            const dateMatch = rawTitle.match(/\b(\d{1,2}\/\d{1,2})\b/);
-                            const dateStr = dateMatch?.[1] || ddmm;
-                            const hasItaly = /\bitaly\b/i.test(rawTitle);
-                            // Rimuovi date/country dal tail per ottenere la lega pulita
-                            let league = tail
-                                .replace(/\b(\d{1,2}\/\d{1,2})\b/gi, '')
-                                .replace(/\bitaly\b/gi, '')
-                                .replace(/\s{2,}/g, ' ')
-                                .replace(/^[-–—\s]+|[-–—\s]+$/g, '')
-                                .trim();
-                            // Titolo canale: Evento ⏰ HH:MM - DD/MM (senza Italy, senza lega)
-                            (channelWithPrefix as any).name = `${eventTitle} ⏰ ${hhmm}${dateStr ? ` - ${dateStr}` : ''}`;
-                            // Summary: 🔴 Inizio: HH:MM - Evento - Lega - DD/MM Italy
-                            channelWithPrefix.description = `🔴 Inizio: ${hhmm} - ${eventTitle}${league ? ` - ${league}` : ''}${dateStr ? ` - ${dateStr}` : ''}${hasItaly ? ' Italy' : ''}`.trim();
+                            // Richiesto: linea unica iniziale con icona e orario + titolo evento
+                            channelWithPrefix.description = `🔴 Inizio: ${hhmm} ${channel.name}${baseDesc ? `\n${baseDesc}` : ''}`.trim();
                         } catch {
-                            channelWithPrefix.description = channel.name || '';
+                            channelWithPrefix.description = baseDesc || channel.name;
                         }
                     } else {
-                        // Se manca l'orario, mantieni nome e descrizione originali
-                        channelWithPrefix.description = channel.name || '';
+                        channelWithPrefix.description = baseDesc || channel.name;
                     }
                 } else if (epgManager) {
                     // Canali tradizionali: EPG
@@ -1453,31 +1102,13 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                 // Meta: canali dinamici senza EPG con ora inizio
                 if ((channel as any)._dynamic) {
                     const eventStart = (channel as any).eventStart || (channel as any).eventstart;
-                    let finalDesc = channel.name || '';
-                    const stripTimePrefix = (t: string): string => t.replace(/^\s*([⏰🕒]?\s*)?\d{1,2}[\.:]\d{2}\s*[:\-]\s*/i, '').trim();
+                    const baseDesc = channel.description || '';
+                    let finalDesc = baseDesc || channel.name;
                     if (eventStart) {
                         try {
                             const dt = new Date(eventStart);
                             const hhmm = dt.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Europe/Rome' }).replace(/\./g, ':');
-                            const ddmm = (() => {
-                                try { return dt.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Rome' }); } catch { return ''; }
-                            })();
-                            const rawTitle = stripTimePrefix(channel.name || '');
-                            const parts = rawTitle.split(' - ').map(s => s.trim()).filter(Boolean);
-                            const eventTitle = parts[0] || rawTitle;
-                            let tail = parts.slice(1).join(' - ');
-                            const dateMatch = rawTitle.match(/\b(\d{1,2}\/\d{1,2})\b/);
-                            const dateStr = dateMatch?.[1] || ddmm;
-                            const hasItaly = /\bitaly\b/i.test(rawTitle);
-                            let league = tail
-                                .replace(/\b(\d{1,2}\/\d{1,2})\b/gi, '')
-                                .replace(/\bitaly\b/gi, '')
-                                .replace(/\s{2,}/g, ' ')
-                                .replace(/^[-–—\s]+|[-–—\s]+$/g, '')
-                                .trim();
-                            // Nome coerente anche nel meta: Evento ⏰ HH:MM - DD/MM
-                            (metaWithPrefix as any).name = `${eventTitle} ⏰ ${hhmm}${dateStr ? ` - ${dateStr}` : ''}`;
-                            finalDesc = `🔴 Inizio: ${hhmm} - ${eventTitle}${league ? ` - ${league}` : ''}${dateStr ? ` - ${dateStr}` : ''}${hasItaly ? ' Italy' : ''}`.trim();
+                            finalDesc = `🔴 Inizio: ${hhmm} ${channel.name}${baseDesc ? `\n${baseDesc}` : ''}`.trim();
                         } catch {/* ignore */}
                     }
                     (metaWithPrefix as any).description = finalDesc;
@@ -1631,11 +1262,6 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                     debugLog(`Config DEBUG - mediaFlowProxyPassword: ${config.mediaFlowProxyPassword ? '***' : 'NOT SET'}`);
                     
                     let streams: { url: string; title: string }[] = [];
-                    const vavooCleanPromises: Promise<void>[] = [];
-                    // Collect clean Vavoo results per variant index to prepend in order later
-                    const vavooCleanPrepend: Array<{ url: string; title: string } | undefined> = [];
-                    // Keep track of found Vavoo variant URLs to allow fallback insertion
-                    const vavooFoundUrls: string[] = [];
                     // Stato toggle MPD (solo da config checkbox, niente override da env per evitare comportamento inatteso)
                     const mpdEnabled = !!config.enableMpd;
 
@@ -1656,22 +1282,12 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                             if (alias) {
                                 const vUrl = resolveFirstVavooUrlForAlias(alias);
                                 if (vUrl) {
-                                    // Only prepend the CLEAN non-MFP link (per-request, with headers)
-                                    const reqObj: any = (global as any).lastExpressRequest;
-                                    const clientIp = getClientIpFromReq(reqObj);
-                                    try {
-                                        const clean = await resolveVavooCleanUrl(vUrl, clientIp);
-                                        if (clean && clean.url) {
-                                            vdbg('Alias clean resolved', { alias, url: clean.url.substring(0, 140) });
-                                            const title2 = `🏠 ${alias} (Vavoo) [ITA]`;
-                                            // stash headers via behaviorHints when pushing later
-                                            streams.unshift({ url: clean.url + `#headers#` + Buffer.from(JSON.stringify(clean.headers)).toString('base64'), title: title2 });
-                                        }
-                                    } catch (ee) {
-                                        const msg = (ee as any)?.message || ee;
-                                        vdbg('Alias clean resolve failed', { alias, error: msg });
-                                        console.log('[VAVOO] Clean resolve skipped/failed:', msg);
-                                    }
+                                    const streamTitle = `[🇮🇹 Vavoo] ${alias}`;
+                                    const vFinal = (mfpUrl && mfpPsw)
+                                        ? `${mfpUrl}/proxy/hls/manifest.m3u8?d=${encodeURIComponent(vUrl)}&api_password=${encodeURIComponent(mfpPsw)}`
+                                        : vUrl;
+                                    // prepone, sarà poi copiato in allStreams in fondo
+                                    streams.unshift({ url: vFinal, title: streamTitle });
                                     console.log(`✅ [VAVOO] Injected first stream from alias='${alias}' -> ${vUrl.substring(0, 60)}...`);
                                 } else {
                                     console.log(`⚠️ [VAVOO] Alias trovato ma nessun URL in cache: '${alias}'`);
@@ -1715,8 +1331,13 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                             let t = (e.title || 'Stream').trim();
                             if (!t) t = 'Stream';
                             if (!t.startsWith('[Player Esterno]')) t = `[Player Esterno] ${t}`;
-                            // Non wrappare in extractor/video: pubblica l'URL originale
-                            streams.push({ url: e.url, title: t });
+                            // Richiesta: usare stessa logica proxy extractor ma con redirect_stream=true per Player Esterno
+                            let finalUrl = e.url;
+                            if (mfpUrl && mfpPsw && !finalUrl.startsWith(mfpUrl)) {
+                                finalUrl = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent(finalUrl)}`;
+                            }
+                            // Evita doppio d= annidato
+                            streams.push({ url: finalUrl, title: t });
                         }
                         debugLog(`[DynamicStreams][FAST] restituiti ${streams.length} stream diretti (senza extractor) con etichetta`);
                         dynamicHandled = true;
@@ -1777,7 +1398,7 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                         });
                         for (const r of resolved) streams.push(r);
                         // Append leftover entries (beyond CAP) as direct FAST (no extractor) to still expose them
-            if (extraFast.length) {
+                        if (extraFast.length) {
                             const leftoversToShow = CAP === 1 ? extraFast.slice(0, 1) : extraFast;
                             let appended = 0;
                             for (const e of leftoversToShow) {
@@ -1785,8 +1406,11 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                                 let t = (e.title || 'Stream').trim();
                                 if (!t) t = 'Stream';
                                 t = t.replace(/^\s*\[(FAST|Player Esterno)\]\s*/i, '').trim();
-                // Non wrappare in extractor/video: tieni URL originale
-                streams.push({ url: e.url, title: `[Player Esterno] ${t}` });
+                                let finalUrl = e.url;
+                                if (mfpUrl && mfpPsw && !finalUrl.startsWith(mfpUrl)) {
+                                    finalUrl = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent(finalUrl)}`;
+                                }
+                                streams.push({ url: finalUrl, title: `[Player Esterno] ${t}` });
                                 appended++;
                             }
                             debugLog(`[DynamicStreams][EXTRACTOR] appended ${appended}/${extraFast.length} leftover direct streams (CAP=${CAP})`);
@@ -1971,10 +1595,22 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                                     });
                                     debugLog(`Aggiunto staticUrlD Proxy (MFP, nuova logica): ${finalUrl}`);
                                 } else {
-                                    // Nothing returned; avoid adding extractor/video fallback
+                                    // Fallback: vecchio link
+                                    const daddyProxyUrl = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent((channel as any).staticUrlD)}`;
+                                    streams.push({
+                                        url: daddyProxyUrl,
+                                        title: `[🌐D] ${channel.name} [ITA]`
+                                    });
+                                    debugLog(`Aggiunto staticUrlD Proxy (MFP, fallback): ${daddyProxyUrl}`);
                                 }
                             } catch (err) {
-                                // Error; skip extractor/video fallback altogether
+                                // Fallback: vecchio link
+                                const daddyProxyUrl = `${mfpUrl}/extractor/video?host=DLHD&redirect_stream=true&api_password=${encodeURIComponent(mfpPsw)}&d=${encodeURIComponent((channel as any).staticUrlD)}`;
+                                streams.push({
+                                    url: daddyProxyUrl,
+                                    title: `[🌐D] ${channel.name} [ITA]`
+                                });
+                                debugLog(`Aggiunto staticUrlD Proxy (MFP, errore): ${daddyProxyUrl}`);
                             }
                         } else {
                             streams.push({
@@ -2035,9 +1671,9 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                             }
                         }
                         // Se trovi almeno un link, aggiungi tutti come stream separati numerati
-            if (foundVavooLinks.length > 0) {
+                        if (foundVavooLinks.length > 0) {
                             foundVavooLinks.forEach(({ url, key }, idx) => {
-                                const streamTitle = `[✌️ V-${idx + 1}] ${channel.name} [ITA]`;
+                                const streamTitle = `[✌️V-${idx + 1}] ${channel.name} [ITA]`;
                                 if (mfpUrl && mfpPsw) {
                                     const vavooProxyUrl = `${mfpUrl}/proxy/hls/manifest.m3u8?d=${encodeURIComponent(url)}&api_password=${encodeURIComponent(mfpPsw)}`;
                                     streams.push({
@@ -2050,23 +1686,6 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                                         url
                                     });
                                 }
-                vavooFoundUrls.push(url);
-                                // For each found link, also prepare a clean variant labeled per index (➡️ V-1, V-2, ...)
-                                const reqObj: any = (global as any).lastExpressRequest;
-                                const clientIp = getClientIpFromReq(reqObj);
-                                vavooCleanPromises.push((async () => {
-                                    vdbg('Variant clean resolve attempt', { index: idx + 1, url: url.substring(0, 140) });
-                                    try {
-                                        const clean = await resolveVavooCleanUrl(url, clientIp);
-                                        if (clean && clean.url) {
-                                            const title = `[🏠 V-${idx + 1}] ${channel.name} [ITA]`;
-                                            const urlWithHeaders = clean.url + `#headers#` + Buffer.from(JSON.stringify(clean.headers)).toString('base64');
-                                            vavooCleanPrepend[idx] = { title, url: urlWithHeaders };
-                                        }
-                                    } catch (err) {
-                                        vdbg('Variant clean failed', { index: idx + 1, error: (err as any)?.message || err });
-                                    }
-                                })());
                             });
                             console.log(`[VAVOO] RISULTATO: trovati ${foundVavooLinks.length} link, stream generati:`, streams.map(s => s.title));
                         } else {
@@ -2075,7 +1694,7 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                             if (exact) {
                                 const links = Array.isArray(exact) ? exact : [exact];
                                 links.forEach((url, idx) => {
-                                    const streamTitle = `[✌️ V-${idx + 1}] ${channel.name} [ITA]`;
+                                    const streamTitle = `[✌️V-${idx + 1}] ${channel.name} [ITA]`;
                                     if (mfpUrl && mfpPsw) {
                                         const vavooProxyUrl = `${mfpUrl}/proxy/hls/manifest.m3u8?d=${encodeURIComponent(url)}&api_password=${encodeURIComponent(mfpPsw)}`;
                                         streams.push({
@@ -2088,23 +1707,6 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                                             url
                                         });
                                     }
-                                    vavooFoundUrls.push(url);
-                                    // Prepare clean variant per index as well
-                                    const reqObj: any = (global as any).lastExpressRequest;
-                                    const clientIp = getClientIpFromReq(reqObj);
-                                    vavooCleanPromises.push((async () => {
-                                        vdbg('Variant clean resolve attempt', { index: idx + 1, url: url.substring(0, 140) });
-                                        try {
-                                            const clean = await resolveVavooCleanUrl(url, clientIp);
-                                            if (clean && clean.url) {
-                                                const title = `[🏠 V-${idx + 1}] ${channel.name} [ITA]`;
-                                                const urlWithHeaders = clean.url + `#headers#` + Buffer.from(JSON.stringify(clean.headers)).toString('base64');
-                                                vavooCleanPrepend[idx] = { title, url: urlWithHeaders };
-                                            }
-                                        } catch (err) {
-                                            vdbg('Variant clean failed', { index: idx + 1, error: (err as any)?.message || err });
-                                        }
-                                    })());
                                 });
                                 console.log(`[VAVOO] RISULTATO: fallback chiave esatta, trovati ${links.length} link, stream generati:`, streams.map(s => s.title));
                             } else {
@@ -2116,30 +1718,7 @@ function createBuilder(initialConfig: AddonConfig = {}) {
                     // Se già gestito come evento dinamico, salta Vavoo/TVTap e ritorna subito
                     if (dynamicHandled) {
                         for (const s of streams) {
-                            // Skip any remaining MFP extractor links entirely
-                            if (/\/extractor\/video\?/i.test(s.url)) {
-                                debugLog('[DynamicStreams] Skipping extractor/video URL in dynamicHandled emit:', s.url);
-                                continue;
-                            }
-                            // Support special marker '#headers#<b64json>' to attach headers properly
-                            const marker = '#headers#';
-                            if (s.url.includes(marker)) {
-                                const [pureUrl, b64] = s.url.split(marker);
-                                let hdrs: Record<string, string> | undefined;
-                                try { hdrs = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')); } catch {}
-                            const isVavooClean = !!hdrs && hdrs['Referer'] === 'https://vavoo.to/' && hdrs['User-Agent'] === DEFAULT_VAVOO_UA;
-                            allStreams.push({ name: isVavooClean ? 'Vavoo' : 'Live 🔴', title: s.title, url: pureUrl, behaviorHints: { notWebReady: true, headers: hdrs || {}, proxyHeaders: hdrs || {}, proxyUseFallback: true } as any });
-                            } else {
-                            // Fallback: if this looks like a clean Vavoo sunshine URL and title starts with a variant tag, attach default headers
-                                const looksVavoo = /\b(sunshine|hls\/index\.m3u8)\b/.test(s.url) && !/\bproxy\/hls\//.test(s.url);
-                            const variantTitle = /^\s*\[?\s*(➡️|🏠|✌️)\s*V/i.test(s.title);
-                            if (variantTitle && looksVavoo) {
-                                    const hdrs = { 'User-Agent': DEFAULT_VAVOO_UA, 'Referer': 'https://vavoo.to/' } as Record<string,string>;
-                                    allStreams.push({ name: 'Vavoo', title: s.title, url: s.url, behaviorHints: { notWebReady: true, headers: hdrs, proxyHeaders: hdrs, proxyUseFallback: true } as any });
-                                } else {
-                                    allStreams.push({ name: 'Live 🔴', title: s.title, url: s.url });
-                                }
-                            }
+                            allStreams.push({ name: 'Live 🔴', title: s.title, url: s.url });
                         }
                         console.log(`✅ Returning ${allStreams.length} dynamic event streams`);
                         return { streams: allStreams };
@@ -2224,50 +1803,13 @@ function createBuilder(initialConfig: AddonConfig = {}) {
 
                     // ============ END INTEGRATION SECTIONS ============
 
-                    // Attendi eventuali risoluzioni clean Vavoo prima di restituire
-                    if (vavooCleanPromises.length) {
-                        try { await Promise.allSettled(vavooCleanPromises); } catch {}
-                        // Prepend clean Vavoo variants in order (V-1 first)
-                        let inserted = 0;
-                        vdbg('Clean prepend result', { inserted, totalVariants: vavooCleanPrepend.length });
-                        for (let i = vavooCleanPrepend.length - 1; i >= 0; i--) {
-                            const entry = vavooCleanPrepend[i];
-                            if (entry) { streams.unshift(entry); inserted++; }
-                        }
-                        // If none resolved clean, add numbered fallbacks with default headers for visibility
-            if (inserted === 0 && vavooFoundUrls.length > 0) {
-                            for (let i = vavooFoundUrls.length - 1; i >= 0; i--) {
-                                const u = vavooFoundUrls[i];
-                                const hdrs = { 'User-Agent': DEFAULT_VAVOO_UA, 'Referer': 'https://vavoo.to/' } as Record<string,string>;
-                                const urlWithHeaders = u + `#headers#` + Buffer.from(JSON.stringify(hdrs)).toString('base64');
-                streams.unshift({ title: `[🏠 V-${i + 1}] ${channel.name} [ITA]`, url: urlWithHeaders });
-                            }
-                        }
-                    }
                     // Dopo aver popolato streams (nella logica TV):
                     for (const s of streams) {
-                        // Drop any extractor/video links
-                        if (/\/extractor\/video\?/i.test(s.url)) {
-                            debugLog('[Streams] Skipping extractor/video URL in final emit:', s.url);
-                            continue;
-                        }
-                        const marker = '#headers#';
-                        if (s.url.includes(marker)) {
-                            const [pureUrl, b64] = s.url.split(marker);
-                            let hdrs: Record<string, string> | undefined;
-                            try { hdrs = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')); } catch {}
-                            const isVavooClean = !!hdrs && hdrs['Referer'] === 'https://vavoo.to/' && hdrs['User-Agent'] === DEFAULT_VAVOO_UA;
-                            allStreams.push({ name: isVavooClean ? 'Vavoo' : 'Live 🔴', title: s.title, url: pureUrl, behaviorHints: { notWebReady: true, headers: hdrs || {}, proxyHeaders: hdrs || {}, proxyUseFallback: true } as any });
-                        } else {
-                            const looksVavoo = /\b(sunshine|hls\/index\.m3u8)\b/.test(s.url) && !/\bproxy\/hls\//.test(s.url);
-                            const variantTitle = /^\s*\[?\s*(➡️|🏠|✌️)\s*V/i.test(s.title);
-                            if (variantTitle && looksVavoo) {
-                                const hdrs = { 'User-Agent': DEFAULT_VAVOO_UA, 'Referer': 'https://vavoo.to/' } as Record<string,string>;
-                                allStreams.push({ name: 'Vavoo', title: s.title, url: s.url, behaviorHints: { notWebReady: true, headers: hdrs, proxyHeaders: hdrs, proxyUseFallback: true } as any });
-                            } else {
-                                allStreams.push({ name: 'Live 🔴', title: s.title, url: s.url });
-                            }
-                        }
+                        allStreams.push({
+                            name: 'Live 🔴',
+                            title: s.title,
+                            url: s.url
+                        });
                     }
 
                     // 5. AGGIUNGI STREAM ALTERNATIVI/FALLBACK per canali specifici
@@ -2463,8 +2005,6 @@ function createBuilder(initialConfig: AddonConfig = {}) {
 
 // Server Express
 const app = express();
-// Trust proxy chain so req.ip / req.ips use X-Forwarded-For correctly when behind a proxy/CDN
-try { (app as any).set('trust proxy', true); } catch {}
 
 app.use('/public', express.static(path.join(__dirname, '..', 'public')));
 
@@ -2504,10 +2044,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     debugLog(`Incoming request: ${req.method} ${req.path}`);
     debugLog(`Full URL: ${req.url}`);
     debugLog(`Path segments:`, req.path.split('/'));
-    try {
-        const observedIp = getClientIpFromReq(req);
-        if (observedIp) vdbg('Observed client IP', { observedIp, reqIp: (req as any).ip, reqIps: (req as any).ips });
-    } catch {}
 
     const configString = req.path.split('/')[1];
     debugLog(`Config string extracted: "${configString}" (length: ${configString ? configString.length : 0})`);
@@ -2644,12 +2180,10 @@ app.get('/live/update', async (req: Request, res: Response) => {
         if (requiredToken && provided !== requiredToken) {
             return res.status(403).json({ ok: false, error: 'Forbidden' });
         }
-    // Esegue Live.py immediatamente (se esiste)
-    // Riutilizza executeLiveScript già definita nello scheduler e recupera stdout/stderr
-    const execRes = await (async () => { try { return await (executeLiveScript as any)(); } catch { return undefined; } })();
-    // Subito dopo Live.py: esegui purge per rimuovere eventi vecchi, mantenendo IERI fino alle 08:00 Rome
-    const purgeResult = purgeOldDynamicEvents();
-    // Ricarica sempre i canali dinamici dopo il purge
+        // Esegue Live.py immediatamente (se esiste) e ricarica i canali
+        // Riutilizza executeLiveScript già definita nello scheduler e recupera stdout/stderr
+        const execRes = await (async () => { try { return await (executeLiveScript as any)(); } catch { return undefined; } })();
+    // Assicurati di avere il conteggio aggiornato degli eventi dinamici
     const dyn = loadDynamicChannels(true);
     const dynPath = getDynamicFilePath();
     const dynStats = getDynamicFileStats();
@@ -2667,10 +2201,9 @@ app.get('/live/update', async (req: Request, res: Response) => {
         const clip = (s?: string) => s ? (s.length > 800 ? s.slice(-800) : s) : undefined; // prendi ultime 800 chars
         return res.json({
             ok: true,
-            message: `Live.py eseguito (se presente), purge effettuato e canali ricaricati: eventi dinamici=${dyn.length}${createdCount!=null?` (creati=${createdCount})`:''}`,
+            message: `Live.py eseguito (se presente) e canali ricaricati: eventi dinamici=${dyn.length}${createdCount!=null?` (creati=${createdCount})`:''}`,
             dynamicCount: dyn.length,
             createdCount,
-            purge: purgeResult,
             dynamicFile: {
                 path: dynPath,
                 exists: dynStats.exists,
@@ -2854,13 +2387,6 @@ function scheduleNextLiveRun() {
     logLive('Prossima esecuzione Live.py tra ms', delay);
     setTimeout(async () => {
         await executeLiveScript();
-        try {
-            const r = purgeOldDynamicEvents();
-            loadDynamicChannels(true);
-            logLive('Purge post-run Live.py eseguito', r);
-        } catch (e: any) {
-            logLive('Errore purge post-run Live.py', e?.message || String(e));
-        }
         scheduleNextLiveRun();
     }, delay);
 }
