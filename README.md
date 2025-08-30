@@ -1,9 +1,16 @@
 
 <img width="230" height="293" alt="icon" src="https://github.com/user-attachments/assets/11ef8b0e-6d55-44a4-9ccc-ae7031e99f34" />
 
-# 🎬 StreamViX
+# 🎬 StreamViX | ElfHosted
 
 Un addon per Stremio che estrae sorgenti streaming dai siti vixsrc e animeunity animesaturn daddy e vavoo per permetterti di guardare film, serie TV, anime e tv con la massima semplicità.
+
+[Link di Installazione](https://streamvix.hayd.uk/)
+
+Istanza ElfHosted a pagamento CON MEDIAFLOWProxy incluso (Per Eventi Sportivi)
+
+[Istanza ElfHosted con Mediaflow](https://store.elfhosted.com/product/streamvix/)
+
 
 ---
 
@@ -18,6 +25,7 @@ Un addon per Stremio che estrae sorgenti streaming dai siti vixsrc e animeunity 
 * **🌐 Proxy Unificato:** Un solo proxy MFP per tutti i contenuti (film, serie, anime, TV).
 * **⚡ Modalità FAST Dinamica:** Eventi Live con URL dirette senza passare dall'extractor (toggle runtime) tutte etichettate `[Player Esterno]`.
 * **🎯 Limite & Priorità Estrazioni:** In modalità extractor applica CAP di concorrenza e priorità per sorgenti italiane.
+* **📡 Supporto Live TV:** Canali TV italiani e Eventi Sportivi visibili senza Mediaflow Proxy, scegliere i canali [Vavoo] o con 🏠.
 
 ---
 Comandi per Live TV da browser
@@ -290,6 +298,10 @@ Thanks to https://github.com/ThEditor https://github.com/ThEditor/stremsrc for t
 Un ringraziamento speciale a @UrloMythus per gli extractor e per la logica kitsu
 
 Funzionalità dinamiche FAST / CAP / purge implementate nel 2025.
+
+
+
+
 
 
 
